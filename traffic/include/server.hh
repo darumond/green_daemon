@@ -23,7 +23,7 @@ static int serverMain() {
   // 4. Read traffic in a loop
   char buffer[128];
   while (read(client_fd, buffer, sizeof(buffer)) > 0) {
-    std::cout << "Received 128 bytes: " << buffer << std::endl;
+    std::cout << buffer << std::endl;
   }
 
   close(client_fd);
@@ -48,10 +48,45 @@ int clientMain() {
   // 4. Send traffic in a loop
   while (true) {
     write(sock_fd, msg, sizeof(msg));
-    sleep(1); // Optional: prevents terminal flooding
+    // Sleep for 10ms;
+    usleep(10000);
   }
 
   close(sock_fd);
+  return 0;
+}
+
+#include <cmath>
+#include <iostream>
+#include <sched.h>
+#include <thread>
+#include <vector>
+
+static void thrash_cpu() {
+  while (true) {
+    // 1. Burn CPU cycles
+    volatile double x = 0.0;
+    for (int i = 0; i < 5000; ++i) {
+      x += std::sin(i) * std::cos(i);
+    }
+    sched_yield();
+  }
+}
+
+static int thrashMain() {
+  // Spawn 2x the number of hardware threads to force runqueue backups
+  int num_threads = std::thread::hardware_concurrency() * 2;
+  std::cout << "Spawning " << num_threads << " noisy threads. RIP Scheduler."
+            << std::endl;
+
+  std::vector<std::thread> threads;
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back(thrash_cpu);
+  }
+
+  for (auto &t : threads) {
+    t.join();
+  }
   return 0;
 }
 
