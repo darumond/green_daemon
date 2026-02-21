@@ -6,24 +6,37 @@ import (
 	"ebpf-realtime/proc"
 	"encoding/binary"
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" bpf bpf/tracer.bpf.c -- -I./bpf
+
+var (
+	averageTcpLatency = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "avg_tcp_latency",
+			Help: "Average latency of TCP send requests",
+		},
+	)
+)
 
 // Event struct mirroring our C struct
 type Event struct {
@@ -137,31 +150,37 @@ func (es *EventStore) GetAndClearTcpEvents() []TcpRecord {
 	return result
 }
 
-// startHTTPServer starts an HTTP server that exposes the events via JSON endpoints
-func startHTTPServer(store *EventStore, port string) {
-	http.HandleFunc("/api/sched-events", func(w http.ResponseWriter, r *http.Request) {
-		schedEvents := store.GetAndClearSchedEvents()
-		tcpEvents := store.GetTcpEvents() // Need TCP events for filtering
-		
-		// Only filter if there are TCP events
-		if len(tcpEvents) > 0 {
-			schedEvents = filterSchedEvents(schedEvents, tcpEvents)
-		}
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(schedEvents)
-	})
+func (es *EventStore) Prune() {
+	es.mu.Lock()
+	defer es.mu.Unlock()
 
-	http.HandleFunc("/api/tcp-events", func(w http.ResponseWriter, r *http.Request) {
-		events := store.GetAndClearTcpEvents()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(events)
-	})
+	// 2 seconds in nanoseconds
+	const retentionNs = 2_000_000_000
 
-	log.Printf("Starting HTTP server on port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Printf("HTTP server error: %v", err)
+	// Safety check: if there are no events, do nothing
+	if len(es.tcpEvents) == 0 && len(es.schedEvents) == 0 {
+		return
 	}
+
+	// Find a rough "current time" from the latest TCP event
+	var latestTs uint64
+	if len(es.tcpEvents) > 0 {
+		latestTs = es.tcpEvents[len(es.tcpEvents)-1].Ts
+	}
+
+	cutoff := latestTs - retentionNs
+
+	// Prune Sched Events
+	schedIdx := sort.Search(len(es.schedEvents), func(i int) bool {
+		return es.schedEvents[i].Ts >= cutoff
+	})
+	es.schedEvents = es.schedEvents[schedIdx:]
+
+	// Prune TCP Events
+	tcpIdx := sort.Search(len(es.tcpEvents), func(i int) bool {
+		return es.tcpEvents[i].Ts >= cutoff
+	})
+	es.tcpEvents = es.tcpEvents[tcpIdx:]
 }
 
 func main() {
@@ -226,9 +245,6 @@ func main() {
 		tcpEvents:   make([]TcpRecord, 0),
 	}
 
-	// Start HTTP server in a goroutine
-	go startHTTPServer(store, "8080")
-
 	log.Printf("Profiling PID %d. Press Ctrl-C to stop and save data...", targetPid)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -241,42 +257,97 @@ func main() {
 
 	pidToName := proc.NewProcNameMap()
 
-	var event Event
-	for {
-		record, err := rd.Read()
-		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
-				break
+	// Go fast, read events.
+	go func() {
+		var event Event
+		for {
+			record, err := rd.Read()
+			if err != nil {
+				if errors.Is(err, ringbuf.ErrClosed) {
+					break
+				}
+				continue
 			}
-			log.Printf("Read error: %v", err)
-			continue
-		}
 
-		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
-			log.Printf("Decode error: %v", err)
-			continue
-		}
+			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
+				log.Printf("Decode error: %v", err)
+			}
 
-		switch event.Type {
-		case EventTypeTcpSend:
-			store.AddTcpEvent(TcpRecord{
-				Ts:         event.Ts,
-				DurationNs: event.DurationNs,
-				Size:       event.Packetsize,
-			})
-		case EventTypeSchedSwitch:
-			prevName, _ := pidToName.GetName(proc.Pid(event.Pid))
-			nextName, _ := pidToName.GetName(proc.Pid(event.NextPid))
-			store.AddSchedEvent(SchedRecord{
-				Ts:       event.Ts,
-				Cpu:      event.Cpu,
-				PrevPid:  event.Pid,
-				NextPid:  event.NextPid,
-				PrevComm: prevName,
-				NextComm: nextName,
-			})
+			switch event.Type {
+			case EventTypeTcpSend:
+				store.AddTcpEvent(TcpRecord{
+					Ts:         event.Ts,
+					DurationNs: event.DurationNs,
+					Size:       event.Packetsize,
+				})
+			case EventTypeSchedSwitch:
+				prevName, _ := pidToName.GetName(proc.Pid(event.Pid))
+				nextName, _ := pidToName.GetName(proc.Pid(event.NextPid))
+				store.AddSchedEvent(SchedRecord{
+					Ts:       event.Ts,
+					Cpu:      event.Cpu,
+					PrevPid:  event.Pid,
+					NextPid:  event.NextPid,
+					PrevComm: prevName,
+					NextComm: nextName,
+				})
+			}
+		}
+	}()
+
+	invokePython := func() {
+		now := time.Now()
+		formatted := "anomalies/" + now.Format("15:04:05") + ".html"
+		venvPython := "/home/ethan/dev/green_daemon/python/.venv/bin/python"
+		cmd := exec.Command(venvPython, "../python/gantt.py", formatted, "./tcp_anomaly.csv", "./sched_anomaly.csv")
+		cmd.Env = os.Environ()
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		if err != nil {
+			fmt.Println(cmd.Stdout)
+			fmt.Println(cmd.Stderr)
+			panic(err)
 		}
 	}
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Second) // Evaluate every second
+		defer ticker.Stop()
+
+		for range ticker.C {
+			recentTcp := store.GetAndClearTcpEvents()
+			if len(recentTcp) == 0 {
+				continue
+			}
+
+			var totalLatency uint64
+			var maxLatency uint64
+			for _, req := range recentTcp {
+				totalLatency += req.DurationNs
+				if req.DurationNs > maxLatency {
+					maxLatency = req.DurationNs
+				}
+			}
+			avgLatency := totalLatency / uint64(len(recentTcp))
+			averageTcpLatency.Set(float64(avgLatency))
+
+			thresholdNs := uint64(30_000)
+			if maxLatency > thresholdNs {
+				log.Printf("ANOMALY DETECTED! Max latency: %d ns. Dumping trace...", maxLatency)
+
+				sched := store.GetAndClearSchedEvents()
+
+				saveTcpToCsv("tcp_anomaly.csv", recentTcp)
+				saveSchedToCsv("sched_anomaly.csv", sched)
+				invokePython()
+			}
+		}
+	}()
+
+	http.Handle("/metrics", promhttp.Handler())
+	println("Starting server on :8080")
+	http.ListenAndServe(":8080", nil)
 }
 
 func printSummary(pid uint32, tcpCount, schedCount int) {
