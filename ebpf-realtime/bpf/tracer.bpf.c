@@ -79,6 +79,8 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret) {
     return 0;
   }
 
+  bpf_printk("tcp_sendmsg called by PID %d", pid);
+
   struct tcp_start_info *start_ts = bpf_map_lookup_elem(&tcp_start_times, &id);
   if (!start_ts) {
     return 0;
@@ -105,7 +107,6 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret) {
 
 SEC("raw_tracepoint/sched_switch")
 int raw_tp_sched_switch(struct bpf_raw_tracepoint_args *ctx) {
-  // ctx->args[0] is prev task_struct, ctx->args[1] is next task_struct
   struct task_struct *prev = (struct task_struct *)ctx->args[0];
   struct task_struct *next = (struct task_struct *)ctx->args[1];
 

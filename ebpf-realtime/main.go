@@ -107,20 +107,17 @@ func main() {
 	}
 	defer tp.Close()
 
-	// 4. Set up Ring Buffer
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
 		log.Fatalf("Failed to open ringbuf reader: %v", err)
 	}
 	defer rd.Close()
 
-	// Collection Slices
 	var schedEvents []SchedRecord
 	var tcpEvents []TcpRecord
 
 	log.Printf("Profiling PID %d. Press Ctrl-C to stop and save data...", targetPid)
 
-	// Context for graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -131,7 +128,6 @@ func main() {
 
 	pidToName := proc.NewProcNameMap()
 
-	// 5. Event Loop
 	var event Event
 	for {
 		record, err := rd.Read()
@@ -158,7 +154,6 @@ func main() {
 		case EventTypeSchedSwitch:
 			prevName, _ := pidToName.GetName(proc.Pid(event.Pid))
 			nextName, _ := pidToName.GetName(proc.Pid(event.NextPid))
-
 			schedEvents = append(schedEvents, SchedRecord{
 				Ts:       event.Ts,
 				Cpu:      event.Cpu,
@@ -170,7 +165,6 @@ func main() {
 		}
 	}
 
-	// 6. Summary and CSV Output
 	printSummary(targetPid, len(tcpEvents), len(schedEvents))
 
 	if err := saveTcpToCsv("tcp_latency.csv", tcpEvents); err != nil {
