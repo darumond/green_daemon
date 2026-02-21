@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+
+# Logs
+*.log
+
+# Env
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Grafana local files (if any)
+*.db
+
+data/
