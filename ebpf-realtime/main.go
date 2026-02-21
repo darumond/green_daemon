@@ -143,7 +143,10 @@ func startHTTPServer(store *EventStore, port string) {
 		schedEvents := store.GetAndClearSchedEvents()
 		tcpEvents := store.GetTcpEvents() // Need TCP events for filtering
 		
-		schedEvents = filterSchedEvents(schedEvents, tcpEvents)
+		// Only filter if there are TCP events
+		if len(tcpEvents) > 0 {
+			schedEvents = filterSchedEvents(schedEvents, tcpEvents)
+		}
 		
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(schedEvents)
@@ -153,14 +156,6 @@ func startHTTPServer(store *EventStore, port string) {
 		events := store.GetAndClearTcpEvents()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(events)
-	})
-
-	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"sched_events_count": store.GetSchedEventsCount(),
-			"tcp_events_count":   store.GetTcpEventsCount(),
-		})
 	})
 
 	log.Printf("Starting HTTP server on port %s", port)
@@ -282,20 +277,6 @@ func main() {
 			})
 		}
 	}
-
-	schedEvents := store.GetSchedEvents()
-	tcpEvents := store.GetTcpEvents()
-
-	printSummary(targetPid, len(tcpEvents), len(schedEvents))
-
-	schedEvents = filterSchedEvents(schedEvents, tcpEvents)
-
-	if err := saveTcpToCsv("tcp_latency.csv", tcpEvents); err != nil {
-		log.Printf("Failed to save TCP CSV: %v", err)
-	}
-	if err := saveSchedToCsv("scheduling_events.csv", schedEvents); err != nil {
-		log.Printf("Failed to save Sched CSV: %v", err)
-	}
 }
 
 func printSummary(pid uint32, tcpCount, schedCount int) {
@@ -364,7 +345,7 @@ func filterSchedEvents(schedEvents []SchedRecord, tcpEvents []TcpRecord) []Sched
 		return tcpEvents[i].Ts < tcpEvents[j].Ts
 	})
 
-	var filtered []SchedRecord
+	filtered := make([]SchedRecord, 0)
 	lastAddedIdx := -1 // Track this to prevent duplicates if TCP windows overlap
 
 	for _, tcp := range tcpEvents {
