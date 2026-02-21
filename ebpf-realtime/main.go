@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"ebpf-realtime/proc"
 	"encoding/binary"
 	"encoding/csv"
 	"errors"
@@ -29,10 +30,9 @@ type Event struct {
 	_          [4]byte // Padding
 	Ts         uint64
 	DurationNs uint64
+	Packetsize uint64
 	NextPid    uint32
-	_          [4]byte // Padding
-	Comm       [16]byte
-	NextComm   [16]byte
+	_          [4]byte
 }
 
 const (
@@ -53,10 +53,10 @@ type SchedRecord struct {
 type TcpRecord struct {
 	Ts         uint64
 	DurationNs uint64
+	Size       uint64
 }
 
 func main() {
-	// 1. Handle Mandatory Flags
 	pidFlag := flag.Int("pid", 0, "Target PID to monitor for TCP latency (Mandatory)")
 	flag.Parse()
 
@@ -129,6 +129,8 @@ func main() {
 		rd.Close()
 	}()
 
+	pidToName := proc.NewProcNameMap()
+
 	// 5. Event Loop
 	var event Event
 	for {
@@ -151,15 +153,19 @@ func main() {
 			tcpEvents = append(tcpEvents, TcpRecord{
 				Ts:         event.Ts,
 				DurationNs: event.DurationNs,
+				Size:       event.Packetsize,
 			})
 		case EventTypeSchedSwitch:
+			prevName, _ := pidToName.GetName(proc.Pid(event.Pid))
+			nextName, _ := pidToName.GetName(proc.Pid(event.NextPid))
+
 			schedEvents = append(schedEvents, SchedRecord{
 				Ts:       event.Ts,
 				Cpu:      event.Cpu,
 				PrevPid:  event.Pid,
 				NextPid:  event.NextPid,
-				PrevComm: string(bytes.Trim(event.Comm[:], "\x00")),
-				NextComm: string(bytes.Trim(event.NextComm[:], "\x00")),
+				PrevComm: prevName,
+				NextComm: nextName,
 			})
 		}
 	}
@@ -193,11 +199,12 @@ func saveTcpToCsv(filename string, data []TcpRecord) error {
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	writer.Write([]string{"timestamp_ns", "duration_ns"})
+	writer.Write([]string{"timestamp_ns", "duration_ns", "size_bytes"})
 	for _, r := range data {
 		writer.Write([]string{
 			strconv.FormatUint(r.Ts, 10),
 			strconv.FormatUint(r.DurationNs, 10),
+			strconv.FormatUint(r.Size, 10),
 		})
 	}
 	log.Printf("Saved %d TCP records to %s", len(data), filename)
