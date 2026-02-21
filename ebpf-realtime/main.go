@@ -6,14 +6,17 @@ import (
 	"ebpf-realtime/proc"
 	"encoding/binary"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
 	"strconv"
+	"sync"
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
@@ -55,6 +58,115 @@ type TcpRecord struct {
 	Ts         uint64
 	DurationNs uint64
 	Size       uint64
+}
+
+// EventStore holds the collected events with thread-safe access
+type EventStore struct {
+	mu          sync.RWMutex
+	schedEvents []SchedRecord
+	tcpEvents   []TcpRecord
+}
+
+func (es *EventStore) AddSchedEvent(event SchedRecord) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.schedEvents = append(es.schedEvents, event)
+}
+
+func (es *EventStore) AddTcpEvent(event TcpRecord) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.tcpEvents = append(es.tcpEvents, event)
+}
+
+func (es *EventStore) GetSchedEvents() []SchedRecord {
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	result := make([]SchedRecord, len(es.schedEvents))
+	copy(result, es.schedEvents)
+	return result
+}
+
+func (es *EventStore) GetTcpEvents() []TcpRecord {
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	result := make([]TcpRecord, len(es.tcpEvents))
+	copy(result, es.tcpEvents)
+	return result
+}
+
+func (es *EventStore) GetSchedEventsCount() int {
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	return len(es.schedEvents)
+}
+
+func (es *EventStore) GetTcpEventsCount() int {
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	return len(es.tcpEvents)
+}
+
+func (es *EventStore) ClearSchedEvents() {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.schedEvents = make([]SchedRecord, 0)
+}
+
+func (es *EventStore) ClearTcpEvents() {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.tcpEvents = make([]TcpRecord, 0)
+}
+
+func (es *EventStore) GetAndClearSchedEvents() []SchedRecord {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	result := make([]SchedRecord, len(es.schedEvents))
+	copy(result, es.schedEvents)
+	es.schedEvents = make([]SchedRecord, 0)
+	return result
+}
+
+func (es *EventStore) GetAndClearTcpEvents() []TcpRecord {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	result := make([]TcpRecord, len(es.tcpEvents))
+	copy(result, es.tcpEvents)
+	es.tcpEvents = make([]TcpRecord, 0)
+	return result
+}
+
+// startHTTPServer starts an HTTP server that exposes the events via JSON endpoints
+func startHTTPServer(store *EventStore, port string) {
+	http.HandleFunc("/api/sched-events", func(w http.ResponseWriter, r *http.Request) {
+		schedEvents := store.GetAndClearSchedEvents()
+		tcpEvents := store.GetTcpEvents() // Need TCP events for filtering
+		
+		schedEvents = filterSchedEvents(schedEvents, tcpEvents)
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(schedEvents)
+	})
+
+	http.HandleFunc("/api/tcp-events", func(w http.ResponseWriter, r *http.Request) {
+		events := store.GetAndClearTcpEvents()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(events)
+	})
+
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"sched_events_count": store.GetSchedEventsCount(),
+			"tcp_events_count":   store.GetTcpEventsCount(),
+		})
+	})
+
+	log.Printf("Starting HTTP server on port %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Printf("HTTP server error: %v", err)
+	}
 }
 
 func main() {
@@ -114,8 +226,13 @@ func main() {
 	}
 	defer rd.Close()
 
-	var schedEvents []SchedRecord
-	var tcpEvents []TcpRecord
+	store := &EventStore{
+		schedEvents: make([]SchedRecord, 0),
+		tcpEvents:   make([]TcpRecord, 0),
+	}
+
+	// Start HTTP server in a goroutine
+	go startHTTPServer(store, "8080")
 
 	log.Printf("Profiling PID %d. Press Ctrl-C to stop and save data...", targetPid)
 
@@ -147,7 +264,7 @@ func main() {
 
 		switch event.Type {
 		case EventTypeTcpSend:
-			tcpEvents = append(tcpEvents, TcpRecord{
+			store.AddTcpEvent(TcpRecord{
 				Ts:         event.Ts,
 				DurationNs: event.DurationNs,
 				Size:       event.Packetsize,
@@ -155,7 +272,7 @@ func main() {
 		case EventTypeSchedSwitch:
 			prevName, _ := pidToName.GetName(proc.Pid(event.Pid))
 			nextName, _ := pidToName.GetName(proc.Pid(event.NextPid))
-			schedEvents = append(schedEvents, SchedRecord{
+			store.AddSchedEvent(SchedRecord{
 				Ts:       event.Ts,
 				Cpu:      event.Cpu,
 				PrevPid:  event.Pid,
@@ -165,6 +282,9 @@ func main() {
 			})
 		}
 	}
+
+	schedEvents := store.GetSchedEvents()
+	tcpEvents := store.GetTcpEvents()
 
 	printSummary(targetPid, len(tcpEvents), len(schedEvents))
 
