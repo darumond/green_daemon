@@ -1,0 +1,84 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "hideControls": false,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Packet duration (ns) per packet",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+      "id": 1,
+      "datasource": { "type": "prometheus", "uid": "afdx1vjdx3klcd" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(packet_finish_ns - packet_start_ns)",
+          "legendFormat": "{{process_name}} (pkt {{packet_id}})",
+          "interval": "",
+          "range": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ns" } },
+      "options": { "legend": { "show": true, "displayMode": "list" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Top 10 packet durations",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "id": 2,
+      "datasource": { "type": "prometheus", "uid": "afdx1vjdx3klcd" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, (packet_finish_ns - packet_start_ns))",
+          "legendFormat": "{{process_name}} (pkt {{packet_id}})",
+          "interval": "",
+          "range": true
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ns" } },
+      "options": { "legend": { "show": true }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "type": "table",
+      "title": "Queue lengths during packet lifecycle",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "id": 3,
+      "datasource": { "type": "prometheus", "uid": "afdx1vjdx3klcd" },
+      "targets": [
+        { "refId": "A", "expr": "queue_length" },
+        { "refId": "B", "expr": "runqueue_length" }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "type": "table",
+      "title": "Anomalies (duration &gt; threshold)",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
+      "id": 4,
+      "datasource": { "type": "prometheus", "uid": "afdx1vjdx3klcd" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(packet_finish_ns - packet_start_ns) > 1000000000",
+          "legendFormat": "{{process_name}} (pkt {{packet_id}})"
+        }
+      ],
+      "options": { "showHeader": true }
+    }
+  ],
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["network", "packets"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Packet Timing per Process (Prometheus)",
+  "uid": "packets-timing-1",
+  "version": 2
+}

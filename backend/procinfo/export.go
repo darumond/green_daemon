@@ -2,6 +2,7 @@ package procinfo
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,7 +20,7 @@ var (
 	cpuTime = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "cpu_time_total",
-			Help: "The memory utilization of a process, labeled by name and pid",
+			Help: "The CPU time of a process, labeled by name and pid",
 		},
 		[]string{"name", "pid"},
 	)
@@ -46,8 +47,8 @@ func pollAndUpdate() error {
 		if err != nil {
 			continue
 		}
-		pid := info.proc.Pid
-		labels := []string{name, string(pid)}
+		pid := strconv.Itoa(int(info.proc.Pid))
+		labels := []string{name, pid}
 
 		cpu, err := info.GetCpuTime()
 		if err != nil {
