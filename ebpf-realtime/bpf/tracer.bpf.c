@@ -107,8 +107,8 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret) {
 
 SEC("raw_tracepoint/sched_switch")
 int raw_tp_sched_switch(struct bpf_raw_tracepoint_args *ctx) {
-  struct task_struct *prev = (struct task_struct *)ctx->args[0];
-  struct task_struct *next = (struct task_struct *)ctx->args[1];
+  struct task_struct *prev = (struct task_struct *)ctx->args[1];
+  struct task_struct *next = (struct task_struct *)ctx->args[2];
 
   struct event_t *event =
       bpf_ringbuf_reserve(&events, sizeof(struct event_t), 0);
