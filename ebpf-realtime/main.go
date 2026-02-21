@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"syscall"
 
@@ -167,6 +168,8 @@ func main() {
 
 	printSummary(targetPid, len(tcpEvents), len(schedEvents))
 
+	schedEvents = filterSchedEvents(schedEvents, tcpEvents)
+
 	if err := saveTcpToCsv("tcp_latency.csv", tcpEvents); err != nil {
 		log.Printf("Failed to save TCP CSV: %v", err)
 	}
@@ -228,4 +231,45 @@ func saveSchedToCsv(filename string, data []SchedRecord) error {
 	}
 	log.Printf("Saved %d Scheduling records to %s", len(data), filename)
 	return nil
+}
+
+// filterSchedEvents prunes the scheduling events to only those that occurred
+// during the lifetime of any recorded TCP send operations.
+func filterSchedEvents(schedEvents []SchedRecord, tcpEvents []TcpRecord) []SchedRecord {
+	// 1. Sort both slices by timestamp to account for multi-CPU ring buffer jitter
+	sort.Slice(schedEvents, func(i, j int) bool {
+		return schedEvents[i].Ts < schedEvents[j].Ts
+	})
+	sort.Slice(tcpEvents, func(i, j int) bool {
+		return tcpEvents[i].Ts < tcpEvents[j].Ts
+	})
+
+	var filtered []SchedRecord
+	lastAddedIdx := -1 // Track this to prevent duplicates if TCP windows overlap
+
+	for _, tcp := range tcpEvents {
+		startTime := tcp.Ts - tcp.DurationNs
+		endTime := tcp.Ts
+
+		// 2. Binary search to find the first scheduler event in this window
+		idx := sort.Search(len(schedEvents), func(i int) bool {
+			return schedEvents[i].Ts >= startTime
+		})
+
+		// Fast-forward if we've already added this index from a previous overlapping TCP event
+		if idx <= lastAddedIdx {
+			idx = lastAddedIdx + 1
+		}
+
+		// 3. Collect all events that fall within the current TCP window
+		for i := idx; i < len(schedEvents); i++ {
+			if schedEvents[i].Ts > endTime {
+				break // We are past the window, stop looking
+			}
+			filtered = append(filtered, schedEvents[i])
+			lastAddedIdx = i
+		}
+	}
+
+	return filtered
 }
