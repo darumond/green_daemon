@@ -330,9 +330,10 @@ func main() {
 				}
 			}
 			avgLatency := totalLatency / uint64(len(recentTcp))
+			fmt.Printf("avg TCP latency: %d\n", avgLatency)
 			averageTcpLatency.Set(float64(avgLatency))
 
-			thresholdNs := uint64(30_000)
+			thresholdNs := uint64(80_000)
 			if maxLatency > thresholdNs {
 				log.Printf("ANOMALY DETECTED! Max latency: %d ns. Dumping trace...", maxLatency)
 
